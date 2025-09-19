@@ -2,11 +2,15 @@ import os
 import pandas as pd
 import win32com.client as win32
 import openpyxl # Excelファイルを扱うために内部的に使用されます
+import re
 
 # --- 設定項目 ---
 
+# 0. 送信元メールアドレス（Outlookに追加済みのアカウント）
+SENDER_EMAIL = ''
+
 # 1. 送信するExcelファイル名 (同じフォルダにあるファイル名を指定)
-EXCEL_FILENAME = '加盟店一覧.xlsx'
+EXCEL_FILENAME = 'Book1.xlsx'
 
 # 2. 宛先が書かれたCSVファイル名 (同じフォルダにあるファイル名を指定)
 CSV_FILENAME = 'mail_list.csv'
@@ -31,6 +35,13 @@ MAIL_BODY = '''
 # --- 設定はここまで ---
 
 
+def is_valid_email(addr: str) -> bool:
+    if not addr:
+        return False
+    addr = addr.strip()
+    # 簡易チェック（必要なら強化してください）
+    return re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", addr) is not None
+
 def main():
     try:
         # スクリプトがあるフォルダの絶対パスを取得
@@ -48,9 +59,31 @@ def main():
             print(f"エラー: CSVファイルが見つかりません: {csv_path}")
             return
 
-        # CSVファイルを読み込む（ヘッダーなしと仮定）
-        df = pd.read_csv(csv_path, header=None, names=['name', 'email'])
-        
+        # CSVファイルを読み込む（ヘッダー有無を吸収、空白や無効行を除去）
+        df = pd.read_csv(
+            csv_path,
+            header=None,            # まずはヘッダーなしで読む（先頭行がヘッダーでも後で自動スキップ）
+            names=['name', 'email'],
+            dtype=str,
+            keep_default_na=False,  # 空文字はNaNにしない
+            encoding='utf-8-sig',   # BOM付きUTF-8にも対応
+            usecols=[0, 1]          # 末尾の余分な空列（末尾カンマ）を無視
+        )
+        # 前後空白を除去
+        df['name'] = df['name'].str.strip()
+        # 空白に加えて末尾のカンマやセミコロンなども削除
+        df['email'] = df['email'].str.strip().str.rstrip(';,，、')
+
+        # 先頭行がヘッダーぽい場合は落とす
+        if len(df) > 0 and df.iloc[0]['name'].lower() == 'name' and df.iloc[0]['email'].lower() == 'email':
+            df = df.iloc[1:, :]
+
+        # 無効なメールを除外
+        df = df[df['email'].apply(is_valid_email)]
+        if df.empty:
+            print("エラー: 有効なメールアドレスがCSVにありません。")
+            return
+
         # Outlookアプリケーションを起動
         outlook = win32.Dispatch('outlook.application')
         
@@ -58,27 +91,49 @@ def main():
 
         # CSVの各行に対してメールを作成・送信
         for index, row in df.iterrows():
-            recipient_name = row['name']
-            recipient_email = row['email']
-            
-            # メールアイテムを作成
+            recipient_name = (row['name'] or '').strip()
+            recipient_email = (row['email'] or '').strip()
+
             mail = outlook.CreateItem(0)
-            
-            # 宛先、CC、件名、本文を設定
-            mail.To = recipient_email
-            mail.CC = CC_ADDRESSES
+
+            # 送信元アカウントを指定（Outlookに該当アカウントが追加されている必要があります）
+            try:
+                accounts = outlook.Session.Accounts
+                for account in accounts:
+                    if str(account.SmtpAddress).lower() == SENDER_EMAIL.lower():
+                        mail._oleobj_.Invoke(*(64209, 0, 8, 0, account))  # SendUsingAccount
+                        break
+                else:
+                    print(f"警告: 送信元アカウント {SENDER_EMAIL} がOutlookに見つかりません。既定のアカウントから送信します。")
+            except Exception as e:
+                print(f"送信元アカウントの設定に失敗: {e}（既定のアカウントを使用）")
+
+            # 宛先/CC をRecipients経由で追加し、解決できるか確認
+            recips = mail.Recipients
+            to_r = recips.Add(recipient_email)
+            to_r.Type = 1  # To
+
+            # CC（空ならスキップ）
+            cc_list = [a.strip() for a in CC_ADDRESSES.split(';') if a.strip()] if CC_ADDRESSES else []
+            for cc in cc_list:
+                if is_valid_email(cc):
+                    r = recips.Add(cc)
+                    r.Type = 2  # CC
+
+            # 宛先解決
+            if not recips.ResolveAll():
+                print(f"エラー: 宛先を解決できませんでした -> To: {recipient_email}, CC: {', '.join(cc_list)}")
+                continue
+
             mail.Subject = MAIL_SUBJECT
-            
-            # 本文の最初に宛名を追加
             mail.Body = f"{recipient_name}様\n\n{MAIL_BODY}"
-            
-            # 添付ファイルを追加
             mail.Attachments.Add(excel_path)
-            
-            # メールを送信
-            mail.Send()
-            
-            print(f"送信完了: {recipient_name}様 ({recipient_email})")
+
+            try:
+                mail.Send()
+                print(f"送信完了: {recipient_name}様 ({recipient_email})")
+            except Exception as e:
+                print(f"送信失敗: {recipient_name}様 ({recipient_email}) -> {e}")
 
         print("すべてのメールの送信が完了しました。")
 
