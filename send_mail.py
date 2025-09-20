@@ -1,21 +1,23 @@
 import os
+from glob import glob
 import pandas as pd
 import win32com.client as win32
-import openpyxl # Excelファイルを扱うために内部的に使用されます
+# import openpyxl # Excelファイルを扱うために内部的に使用されます
 import re
 
 # --- 設定項目 ---
 
 # 0. 送信元メールアドレス（Outlookに追加済みのアカウント）
-SENDER_EMAIL = ''
+SENDER_EMAIL = 'maruyama.shun23@gmail.com'
 
-# 1. 送信するExcelファイル名 (同じフォルダにあるファイル名を指定)
-EXCEL_FILENAME = 'Book1.xlsx'
+# 1. 送信用のフォルダ名（このスクリプトと同じ場所に作成）
+# フォルダ内にある Excel ファイルをすべて添付します（.xlsx/.xlsm/.xls）
+ATTACH_DIR = 'to_send'
 
 # 2. 宛先が書かれたCSVファイル名 (同じフォルダにあるファイル名を指定)
 CSV_FILENAME = 'mail_list.csv'
 
-# 3. CCに追加するメールアドレス（複数ある場合はカンマで区切る）
+# 3. CCに追加するメールアドレス（複数ある場合はセミコロン;で区切る）
 CC_ADDRESSES = 'cc1@example.com; cc2@example.com'
 
 # 4. メールの件名
@@ -47,14 +49,24 @@ def main():
         # スクリプトがあるフォルダの絶対パスを取得
         current_dir = os.path.dirname(os.path.abspath(__file__))
         
-        # ファイルのフルパスを作成
-        excel_path = os.path.join(current_dir, EXCEL_FILENAME)
+        # ファイル/フォルダのフルパスを作成
+        attach_dir = os.path.join(current_dir, ATTACH_DIR)
         csv_path = os.path.join(current_dir, CSV_FILENAME)
 
-        # ファイルの存在チェック
-        if not os.path.exists(excel_path):
-            print(f"エラー: Excelファイルが見つかりません: {excel_path}")
+        # 添付フォルダの存在チェックとExcelファイル収集
+        if not os.path.isdir(attach_dir):
+            print(f"エラー: 添付フォルダが見つかりません: {attach_dir}")
+            print("フォルダを作成し、送信したいExcelファイルを入れてください。")
             return
+        # 対象拡張子のファイル一覧
+        excel_files = []
+        for pattern in ("*.xlsx", "*.xlsm", "*.xls"):
+            excel_files.extend(glob(os.path.join(attach_dir, pattern)))
+        if not excel_files:
+            print(f"エラー: 添付フォルダにExcelファイルがありません: {attach_dir}")
+            return
+        else:
+            print(f"添付対象ファイル: {len(excel_files)}件")
         if not os.path.exists(csv_path):
             print(f"エラー: CSVファイルが見つかりません: {csv_path}")
             return
@@ -127,7 +139,9 @@ def main():
 
             mail.Subject = MAIL_SUBJECT
             mail.Body = f"{recipient_name}様\n\n{MAIL_BODY}"
-            mail.Attachments.Add(excel_path)
+            # フォルダ内のExcelファイルをすべて添付
+            for f in excel_files:
+                mail.Attachments.Add(f)
 
             try:
                 mail.Send()
