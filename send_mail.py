@@ -8,32 +8,21 @@ import re
 # --- 設定項目 ---
 
 # 0. 送信元メールアドレス（Outlookに追加済みのアカウント）
-SENDER_EMAIL = 'maruyama.shun23@gmail.com'
+SENDER_EMAIL = ''
 
 # 1. 送信用のフォルダ名（このスクリプトと同じ場所に作成）
 # フォルダ内にある Excel ファイルをすべて添付します（.xlsx/.xlsm/.xls）
 ATTACH_DIR = 'to_send'
 
 # 2. 宛先が書かれたCSVファイル名 (同じフォルダにあるファイル名を指定)
+# CSV形式: 送信先名,送信先メールアドレス,cc先名,cc先メールアドレス
 CSV_FILENAME = 'mail_list.csv'
 
-# 3. CCに追加するメールアドレス（複数ある場合はセミコロン;で区切る）
-CC_ADDRESSES = 'cc1@example.com; cc2@example.com'
+# 3. メール本文のファイル名 (同じフォルダにあるテキストファイル名を指定)
+MAIL_BODY_FILE = 'mail_body.txt'
 
 # 4. メールの件名
 MAIL_SUBJECT = '【更新のご連絡】加盟店一覧'
-
-# 5. メールの本文 ('''で囲むと改行もそのまま反映されます)
-MAIL_BODY = '''
-各位
-
-いつもお世話になっております。
-
-加盟店一覧を更新いたしましたので、ご確認をお願いいたします。
-添付ファイルをご確認ください。
-
-何卒よろしくお願い申し上げます。
-'''
 # --- 設定はここまで ---
 
 
@@ -52,6 +41,7 @@ def main():
         # ファイル/フォルダのフルパスを作成
         attach_dir = os.path.join(current_dir, ATTACH_DIR)
         csv_path = os.path.join(current_dir, CSV_FILENAME)
+        mail_body_path = os.path.join(current_dir, MAIL_BODY_FILE)
 
         # 添付フォルダの存在チェックとExcelファイル収集
         if not os.path.isdir(attach_dir):
@@ -70,30 +60,38 @@ def main():
         if not os.path.exists(csv_path):
             print(f"エラー: CSVファイルが見つかりません: {csv_path}")
             return
+        if not os.path.exists(mail_body_path):
+            print(f"エラー: メール本文ファイルが見つかりません: {mail_body_path}")
+            return
 
-        # CSVファイルを読み込む（ヘッダー有無を吸収、空白や無効行を除去）
+        # メール本文をファイルから読み込み
+        with open(mail_body_path, 'r', encoding='utf-8') as f:
+            mail_body_template = f.read().strip()
+
+        # CSVファイルを読み込む（4列対応: 送信先名,送信先メール,cc先名,cc先メール）
         df = pd.read_csv(
             csv_path,
             header=None,            # まずはヘッダーなしで読む（先頭行がヘッダーでも後で自動スキップ）
-            names=['name', 'email'],
+            names=['to_name', 'to_email', 'cc_name', 'cc_email'],
             dtype=str,
             keep_default_na=False,  # 空文字はNaNにしない
             encoding='utf-8-sig',   # BOM付きUTF-8にも対応
-            usecols=[0, 1]          # 末尾の余分な空列（末尾カンマ）を無視
+            usecols=[0, 1, 2, 3]    # 4列を読み取り
         )
         # 前後空白を除去
-        df['name'] = df['name'].str.strip()
-        # 空白に加えて末尾のカンマやセミコロンなども削除
-        df['email'] = df['email'].str.strip().str.rstrip(';,，、')
+        df['to_name'] = df['to_name'].str.strip()
+        df['to_email'] = df['to_email'].str.strip().str.rstrip(';,，、')
+        df['cc_name'] = df['cc_name'].str.strip()
+        df['cc_email'] = df['cc_email'].str.strip().str.rstrip(';,，、')
 
         # 先頭行がヘッダーぽい場合は落とす
-        if len(df) > 0 and df.iloc[0]['name'].lower() == 'name' and df.iloc[0]['email'].lower() == 'email':
+        if len(df) > 0 and df.iloc[0]['to_name'].lower() in ('name', 'to_name', '送信先名'):
             df = df.iloc[1:, :]
 
-        # 無効なメールを除外
-        df = df[df['email'].apply(is_valid_email)]
+        # 無効なメールを除外（送信先は必須、CC先は任意）
+        df = df[df['to_email'].apply(is_valid_email)]
         if df.empty:
-            print("エラー: 有効なメールアドレスがCSVにありません。")
+            print("エラー: 有効な送信先メールアドレスがCSVにありません。")
             return
 
         # Outlookアプリケーションを起動
@@ -103,8 +101,10 @@ def main():
 
         # CSVの各行に対してメールを作成・送信
         for index, row in df.iterrows():
-            recipient_name = (row['name'] or '').strip()
-            recipient_email = (row['email'] or '').strip()
+            recipient_name = (row['to_name'] or '').strip()
+            recipient_email = (row['to_email'] or '').strip()
+            cc_name = (row['cc_name'] or '').strip()
+            cc_email = (row['cc_email'] or '').strip()
 
             mail = outlook.CreateItem(0)
 
@@ -125,27 +125,27 @@ def main():
             to_r = recips.Add(recipient_email)
             to_r.Type = 1  # To
 
-            # CC（空ならスキップ）
-            cc_list = [a.strip() for a in CC_ADDRESSES.split(';') if a.strip()] if CC_ADDRESSES else []
-            for cc in cc_list:
-                if is_valid_email(cc):
-                    r = recips.Add(cc)
-                    r.Type = 2  # CC
+            # CC（行ごとのCCメールがあれば追加）
+            if cc_email and is_valid_email(cc_email):
+                cc_r = recips.Add(cc_email)
+                cc_r.Type = 2  # CC
 
             # 宛先解決
             if not recips.ResolveAll():
-                print(f"エラー: 宛先を解決できませんでした -> To: {recipient_email}, CC: {', '.join(cc_list)}")
+                cc_info = f" CC: {cc_email}" if cc_email else ""
+                print(f"エラー: 宛先を解決できませんでした -> To: {recipient_email}{cc_info}")
                 continue
 
             mail.Subject = MAIL_SUBJECT
-            mail.Body = f"{recipient_name}様\n\n{MAIL_BODY}"
+            mail.Body = f"{recipient_name}様\n\n{mail_body_template}"
             # フォルダ内のExcelファイルをすべて添付
             for f in excel_files:
                 mail.Attachments.Add(f)
 
             try:
                 mail.Send()
-                print(f"送信完了: {recipient_name}様 ({recipient_email})")
+                cc_info = f" (CC: {cc_name} <{cc_email}>)" if cc_email else ""
+                print(f"送信完了: {recipient_name}様 ({recipient_email}){cc_info}")
             except Exception as e:
                 print(f"送信失敗: {recipient_name}様 ({recipient_email}) -> {e}")
 
